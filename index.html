@@ -1,0 +1,289 @@
+<div id="app">
+  <div class="novid" v-if="!video">
+    <h2>YTogether</h2>
+    <span>Play videos with your friends and watch at the same time</span>
+    <input
+      type="url"
+      v-model="videoInput"
+      placeholder="Enter a video URL here"
+    />
+    <button @click="goToVid()">Play video</button>
+  </div>
+  <div id="player_container"><div id="__player"></div></div>
+  <div class="message_container" v-if="video">
+    <input
+      @keyup.enter="sendMessage()"
+      v-model="message"
+      :placeholder="user ? `Send a message as ${user}` : `Send a message`"
+    />
+    <ul id="messages">
+      <li v-for="message in messages">
+        <b>{{message.author}}:</b><span>{{message.text}}</span>
+      </li>
+    </ul>
+  </div>
+</div>
+<script src="https://unpkg.com/vue@3"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.4.0/socket.io.js"></script>
+<script>
+  let app = Vue.createApp({
+    data() {
+      return {
+        messages: [],
+        message: "", //current message
+        user: localStorage.getItem("username") || null, //Users username
+        events: [], //This is to prevent recursive loops
+        video: null,
+        videoInput: "",
+        params: new URLSearchParams(location.search),
+        player: null, //This is the player object from the YouTube API
+        socket: io(),
+        startTime: 0,
+        playerReady: new Promise((res) => (window.playerReadyRes = res)),
+      };
+    },
+    async mounted() {
+      this.video = this.params.get("q") || this.params.get("v") || this.video;
+      try {
+        let u = new URL(this.video);
+        let p = new URLSearchParams(u.search);
+        if (p.get("v")) {
+          this.video = p.get("v");
+        }
+      } catch (_) {}
+
+      if (!this.video) {
+        return;
+      }
+      // IMPORTANT: this has to be below the above part otherwise id sent will be null
+      this.dispatch("join", this.video);
+      this.socket.on("play", (time) => {
+        if (!this.isMine("play", time)) {
+          app.player.playVideo();
+          app.player.seekTo(time);
+        }
+      });
+      this.socket.on("paused", (time) => {
+        if (!this.isMine("paused", time)) {
+          app.player.pauseVideo();
+          app.player.seekTo(time);
+        }
+      });
+      window.socket = io(); //Just so we can do stuff in the console if we need to
+      this.socket.on("message", (msg) => {
+        console.log("got message!", msg);
+        app.messages = [msg, ...app.messages];
+      });
+      this.socket.on("time", async (time) => {
+        console.log("Starting video at", time);
+        this.playVideo(this.video);
+        this.startTime = time;
+        await this.playerReady;
+        console.log("Player ready");
+        this.player.seekTo(this.startTime);
+        setInterval(() => {
+          this.dispatch("time", app.player.getCurrentTime());
+        }, 1000);
+      });
+    },
+    watch: {
+      video() {
+        this.playVideo(this.video);
+      },
+    },
+    methods: {
+      sendMessage() {
+        if (!this.user) {
+          this.user = prompt("What do you want to be called?");
+          localStorage.setItem("username", this.user);
+        }
+        this.dispatch("message", { author: this.user, text: this.message });
+        this.message = "";
+        console.log("sending", this.message);
+      },
+      isMine(event, data) {
+        // This method basically checks if we just sent the event
+        //Assume a latency of up to 3 seconds before the exact same action can be repeated.
+        // this.events = this.events.filter(i => Date.now() - i.time < 3000)
+        // Also skipping within 3 seconds
+        return !!this.events.find(
+          (i) => i.event === event && Math.abs(i.data - data) < 0.1
+        );
+      },
+      log(...stuff) {
+        // This is so I can turn off console logs later
+        console.log(...stuff);
+      },
+      dispatch(event, data) {
+        this.log(`Sending ${event}`, data);
+        // Not really sure why I used this dispatch method instead of the thing below but whatever
+        this.socket.emit(event, data);
+        this.events.push({ event, data, time: Date.now() });
+      },
+      goToVid() {
+        location = `https://${location.host}${
+          location.pathname
+        }?v=${encodeURIComponent(this.videoInput)}`;
+      },
+      playVideo(id, options = {}) {
+        this.log("Playing video", id);
+        var tag = document.createElement("script");
+        tag.src = "https://www.youtube.com/iframe_api";
+        var firstScriptTag = document.getElementsByTagName("script")[0];
+        firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
+        var player;
+        // This allows us to listen for the ready event from youtube, "onYouTubeIframeAPIReady" cannot be changed to anything else.
+        window.onYouTubeIframeAPIReady = onReady;
+        function onReady() {
+          app.log("YouTube API ready");
+          player = new YT.Player("__player", {
+            height: "720",
+            width: "1280",
+            videoId: id,
+            ...options,
+            playerVars: {
+              origin: `https://${location.hostname}/`,
+            },
+            playerVars: {
+              playsinline: 1,
+            },
+            events: {
+              onReady: onPlayerReady,
+              onStateChange: onPlayerStateChange,
+            },
+          });
+          app.player = player;
+        }
+
+        function onPlayerReady(event) {
+          event.target.playVideo();
+          window.playerReadyRes();
+        }
+
+        var done = false;
+
+        function onPlayerStateChange(event) {
+          // We can't use this.dispatch here because this function's scope is the global scope, not the current playVideo() method's scope
+          switch (event.data) {
+            case 1:
+              app.dispatch("play", player.getCurrentTime());
+              break;
+            case 2:
+              app.dispatch("paused", player.getCurrentTime());
+              break;
+          }
+        }
+      },
+    },
+  }).mount("#app");
+</script>
+<style>
+  	* {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+      font-family: sans-serif;
+  }
+
+  body {
+      display: flex;
+      justify-content: center;
+      min-height: 100vh;
+  }
+  iframe {
+      width: 100vw;
+      height: 70vh;
+      display: block;
+  }
+  .message_container {
+      padding: 10px;
+      display: block;
+      margin: 0 auto;
+      width: 100vw;
+      max-width: 800px;
+  		height: 30vh;
+  		overflow: scroll;
+  }
+  .message_container li b {
+      margin-right: 3px;
+  }
+  input {
+      padding: 10px;
+      margin: 10px;
+      width: calc(100% - 20px);
+      border: 1px solid #fff3;
+  		color: white;
+      border-radius: 3px;
+  }
+  input:focus {
+      border-color: dodgerBlue;
+      outline: none;
+  }
+  #messages {
+      width: 100%;
+      padding: 10px;
+      list-style: none;
+  }
+  #messages li {
+      display: block;
+      background: #0401;
+      padding: 10px;
+      border-radius: 3px;
+  }
+  body {
+      background: black;
+      color: white;
+  }
+  input {
+      background: transparent;
+  }
+  input:focus {
+      box-shadow: 0 0 0 3px #44f4;
+  }
+  li span {
+      color: #ccc;
+  }
+  li b {
+      color: #779;
+      user-select: none;
+  }
+  	.novid {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+  }
+
+  .novid h2 {
+      width: 100%;
+      text-align: center;
+      margin-bottom: 10px;
+      font-weight: 100;
+      font-size: 2.3rem;
+      font-style: italic;
+      color: #9bb;
+  }
+
+  .novid span {
+      padding: 0 30px;
+      display: block;
+      text-align: center;
+      font-style: italic;
+      color: #555;
+  }
+
+  .novid button {
+      width: calc(100% - 20px);
+      padding: 10px 20px;
+      margin: 10px;
+      color: white;
+      background: #fff1;
+      border: none;
+      border-radius: 4px;
+  }
+
+  .novid button:hover {
+      background: #fff3;
+      cursor: pointer;
+  }
+</style>

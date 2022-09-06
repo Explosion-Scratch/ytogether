@@ -1,2 +1,1 @@
-# ytogether
-Play YouTube videos with all your friends and chat!
+https://ytogether.explosionscratc.repl.co
